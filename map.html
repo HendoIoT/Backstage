@@ -30,7 +30,7 @@
 
   <script>
     // URL params:
-    //  - data=<URL-ENCODED-GEOJSON-URL>
+    //  - data=<URL-ENCODED-RETOOL-PUBLIC-URL>
     //  - lat, lng, z (optional default viewport)
     const params = new URLSearchParams(location.search);
     const dataUrl = params.get("data");
@@ -43,16 +43,19 @@
     let selectedId = null;
 
     function setSelected(assetId, { pan = true } = {}) {
+      if (!assetId) return;
+
       // reset old
       if (selectedId && markersById.has(selectedId)) {
         markersById.get(selectedId).setIcon(null);
         markersById.get(selectedId).setZIndex(undefined);
       }
 
-      selectedId = assetId;
-      const marker = markersById.get(assetId);
+      selectedId = String(assetId);
+      const marker = markersById.get(selectedId);
       if (!marker) return;
 
+      // highlight selected marker
       marker.setIcon({
         path: google.maps.SymbolPath.CIRCLE,
         fillColor: "#f59e0b",
@@ -70,16 +73,57 @@
     }
 
     async function loadGeoJSON() {
-      if (!dataUrl) return;
-      const res = await fetch(dataUrl);
-      const gj = await res.json();
+      if (!dataUrl) {
+        console.warn("No data= URL param provided.");
+        return;
+      }
 
-      (gj.features || []).forEach((f) => {
+      // Retool /url/ endpoints typically work fine with POST like your curl test
+      const res = await fetch(dataUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      });
+
+      if (!res.ok) {
+        console.error("Data fetch failed:", res.status, await res.text());
+        return;
+      }
+
+      const payload = await res.json();
+
+      // Retool wraps response as { data: <yourReturn> }
+      const gj = payload?.data ?? payload;
+
+      if (!gj || gj.type !== "FeatureCollection" || !Array.isArray(gj.features)) {
+        console.error("Invalid GeoJSON response. Got:", payload);
+        return;
+      }
+
+      // clear existing markers if reloading
+      for (const m of markersById.values()) m.setMap(null);
+      markersById.clear();
+      selectedId = null;
+
+      console.log("Loaded features:", gj.features.length);
+
+      gj.features.forEach((f) => {
         if (f?.geometry?.type !== "Point") return;
 
-        const [lng, lat] = f.geometry.coordinates;
+        const coords = f.geometry.coordinates;
+        if (!Array.isArray(coords) || coords.length < 2) return;
+
+        const [lng, lat] = coords;
         const props = f.properties || {};
-        const assetId = props.asset_id || props.id || props.device_id;
+
+        // Your workflow sets device_identifier. Keep fallbacks just in case.
+        const assetId =
+          props.device_identifier ||
+          props.asset_id ||
+          props.id ||
+          props.device_id ||
+          props.name;
+
         if (!assetId) return;
 
         const marker = new google.maps.Marker({
@@ -90,8 +134,10 @@
 
         marker.addListener("click", () => {
           setSelected(assetId, { pan: false });
+
+          // send selection back to parent (Retool iframe)
           window.parent?.postMessage(
-            { type: "assetSelected", assetId, properties: props },
+            { type: "assetSelected", assetId: String(assetId), properties: props },
             "*"
           );
         });
@@ -100,13 +146,18 @@
       });
     }
 
-    // Receive commands from Retool
+    // Receive commands from Retool (table click -> highlight marker)
     window.addEventListener("message", (e) => {
       const msg = e.data;
       if (!msg || typeof msg !== "object") return;
 
       if (msg.type === "selectAsset" && msg.assetId) {
         setSelected(String(msg.assetId), { pan: true });
+      }
+
+      // Optional: allow Retool to force map type
+      if (msg.type === "setMapType" && msg.mapTypeId && map) {
+        map.setMapTypeId(msg.mapTypeId);
       }
     });
 
