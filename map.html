@@ -45,7 +45,7 @@
     function setSelected(assetId, { pan = true } = {}) {
       if (!assetId) return;
 
-      // reset old
+      // reset old selection
       if (selectedId && markersById.has(selectedId)) {
         markersById.get(selectedId).setIcon(null);
         markersById.get(selectedId).setZIndex(undefined);
@@ -78,12 +78,8 @@
         return;
       }
 
-      // Retool /url/ endpoints typically work fine with POST like your curl test
-      const res = await fetch(dataUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}"
-      });
+      // Use GET with no custom headers to avoid CORS preflight issues
+      const res = await fetch(dataUrl);
 
       if (!res.ok) {
         console.error("Data fetch failed:", res.status, await res.text());
@@ -106,6 +102,8 @@
       selectedId = null;
 
       console.log("Loaded features:", gj.features.length);
+
+      const bounds = new google.maps.LatLngBounds();
 
       gj.features.forEach((f) => {
         if (f?.geometry?.type !== "Point") return;
@@ -132,6 +130,8 @@
           title: String(assetId)
         });
 
+        bounds.extend(marker.getPosition());
+
         marker.addListener("click", () => {
           setSelected(assetId, { pan: false });
 
@@ -144,6 +144,11 @@
 
         markersById.set(String(assetId), marker);
       });
+
+      // Auto-zoom to show all markers
+      if (!bounds.isEmpty()) {
+        map.fitBounds(bounds);
+      }
     }
 
     // Receive commands from Retool (table click -> highlight marker)
