@@ -42,33 +42,58 @@
     const markersById = new Map(); // assetId -> marker
     let selectedId = null;
 
+    // Colors requested
+    const COLOR_UNSELECTED = "#eaae2a"; // yellow
+    const COLOR_SELECTED   = "#0079bd"; // blue
+
+    // Icons
+    function iconUnselected() {
+      return {
+        path: google.maps.SymbolPath.CIRCLE,
+        fillColor: COLOR_UNSELECTED,
+        fillOpacity: 1,
+        strokeColor: "#ffffff",
+        strokeWeight: 2,
+        scale: 7
+      };
+    }
+
+    function iconSelected() {
+      return {
+        path: google.maps.SymbolPath.CIRCLE,
+        fillColor: COLOR_SELECTED,
+        fillOpacity: 1,
+        strokeColor: "#ffffff",
+        strokeWeight: 2,
+        scale: 9
+      };
+    }
+
     function setSelected(assetId, { pan = true } = {}) {
       if (!assetId) return;
 
-      // reset old selection
+      // reset old selection back to yellow
       if (selectedId && markersById.has(selectedId)) {
-        markersById.get(selectedId).setIcon(null);
-        markersById.get(selectedId).setZIndex(undefined);
+        const old = markersById.get(selectedId);
+        old.setIcon(iconUnselected());
+        old.setZIndex(undefined);
       }
 
       selectedId = String(assetId);
       const marker = markersById.get(selectedId);
       if (!marker) return;
 
-      // highlight selected marker
-      marker.setIcon({
-        path: google.maps.SymbolPath.CIRCLE,
-        fillColor: "#f59e0b",
-        fillOpacity: 1,
-        strokeColor: "#ffffff",
-        strokeWeight: 2,
-        scale: 8
-      });
+      // set selected styling (blue)
+      marker.setIcon(iconSelected());
       marker.setZIndex(9999);
 
       if (pan) {
-        map.panTo(marker.getPosition());
-        if (map.getZoom() < 10) map.setZoom(12);
+        const pos = marker.getPosition();
+        if (pos) map.panTo(pos);
+
+        // Force a useful zoom level for investigation
+        const targetZoom = 12;
+        if (map.getZoom() !== targetZoom) map.setZoom(targetZoom);
       }
     }
 
@@ -78,7 +103,7 @@
         return;
       }
 
-      // Use GET with no custom headers to avoid CORS preflight issues
+      // Use GET (no custom headers) to avoid CORS preflight issues
       const res = await fetch(dataUrl);
 
       if (!res.ok) {
@@ -87,9 +112,7 @@
       }
 
       const payload = await res.json();
-
-      // Retool wraps response as { data: <yourReturn> }
-      const gj = payload?.data ?? payload;
+      const gj = payload?.data ?? payload; // Retool wraps as { data: ... }
 
       if (!gj || gj.type !== "FeatureCollection" || !Array.isArray(gj.features)) {
         console.error("Invalid GeoJSON response. Got:", payload);
@@ -114,7 +137,6 @@
         const [lng, lat] = coords;
         const props = f.properties || {};
 
-        // Your workflow sets device_identifier. Keep fallbacks just in case.
         const assetId =
           props.device_identifier ||
           props.asset_id ||
@@ -127,13 +149,15 @@
         const marker = new google.maps.Marker({
           map,
           position: { lat: Number(lat), lng: Number(lng) },
-          title: String(assetId)
+          title: String(assetId),
+          icon: iconUnselected()
         });
 
         bounds.extend(marker.getPosition());
 
         marker.addListener("click", () => {
-          setSelected(assetId, { pan: false });
+          // IMPORTANT: pan/zoom on click
+          setSelected(assetId, { pan: true });
 
           // send selection back to parent (Retool iframe)
           window.parent?.postMessage(
@@ -145,14 +169,16 @@
         markersById.set(String(assetId), marker);
       });
 
-      // Auto-zoom to show all markers
+      // Auto-zoom to show all markers (overview)
       if (!bounds.isEmpty()) {
         map.fitBounds(bounds);
+
+        // Clamp initial zoom so it isn't too zoomed out or too zoomed in
         google.maps.event.addListenerOnce(map, "bounds_changed", () => {
-  const z = map.getZoom();
-  if (z > 12) map.setZoom(12);   // don't zoom in too far on tight clusters
-  if (z < 5)  map.setZoom(5);    // don't zoom out too far on wide spread
-});
+          const z = map.getZoom();
+          if (z > 12) map.setZoom(12);
+          if (z < 5)  map.setZoom(5);
+        });
       }
     }
 
@@ -165,7 +191,6 @@
         setSelected(String(msg.assetId), { pan: true });
       }
 
-      // Optional: allow Retool to force map type
       if (msg.type === "setMapType" && msg.mapTypeId && map) {
         map.setMapTypeId(msg.mapTypeId);
       }
