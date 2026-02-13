@@ -2,15 +2,11 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Asset Map</title>
+  <title>Backstage Asset Map</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-  <link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet" />
-  <script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
-
   <style>
-    body { margin: 0; }
-    #map { position: absolute; inset: 0; }
+    html, body { height: 100%; margin: 0; }
+    #map { height: 100%; width: 100%; }
     .toggle {
       position: absolute;
       top: 10px;
@@ -26,85 +22,113 @@
   </style>
 </head>
 <body>
+  <div class="toggle">
+    <label><input type="checkbox" id="satToggle"> Satellite</label>
+  </div>
 
-<div class="toggle">
-  <label><input type="checkbox" id="satToggle" /> Satellite</label>
-</div>
+  <div id="map"></div>
 
-<div id="map"></div>
+  <script>
+    // URL params:
+    //  - data=<URL-ENCODED-GEOJSON-URL>
+    //  - lat, lng, z (optional default viewport)
+    const params = new URLSearchParams(location.search);
+    const dataUrl = params.get("data");
+    const defaultLat = Number(params.get("lat")) || 37;
+    const defaultLng = Number(params.get("lng")) || -96;
+    const defaultZoom = Number(params.get("z")) || 4;
 
-<script>
-  // 1) Put your Mapbox PUBLIC token here (starts with pk.)
-  mapboxgl.accessToken = "pk.eyJ1IjoiaGVuZG9pb3QiLCJhIjoiY21saDZwNzlwMDZpazNjcHd2eDN0YW93cSJ9.j6Zp-rq1KttyoTeZLpmOfA";
+    let map;
+    const markersById = new Map(); // assetId -> marker
+    let selectedId = null;
 
-  const STREETS = "mapbox://styles/mapbox/light-v11";
-  const SAT = "mapbox://styles/mapbox/satellite-streets-v12";
+    function setSelected(assetId, { pan = true } = {}) {
+      // reset old
+      if (selectedId && markersById.has(selectedId)) {
+        markersById.get(selectedId).setIcon(null);
+        markersById.get(selectedId).setZIndex(undefined);
+      }
 
-  // 2) Optional: pass a geojson URL like:
-  //    .../map.html?geojson=https://example.com/assets.geojson
-  const params = new URLSearchParams(location.search);
-  const geojsonUrl = params.get("geojson");
+      selectedId = assetId;
+      const marker = markersById.get(assetId);
+      if (!marker) return;
 
-  // 3) Optional: center/zoom via params:
-  //    ...?lng=-111.9&lat=33.3&z=10
-  const lng = Number(params.get("lng"));
-  const lat = Number(params.get("lat"));
-  const z = Number(params.get("z"));
+      marker.setIcon({
+        path: google.maps.SymbolPath.CIRCLE,
+        fillColor: "#f59e0b",
+        fillOpacity: 1,
+        strokeColor: "#ffffff",
+        strokeWeight: 2,
+        scale: 8
+      });
+      marker.setZIndex(9999);
 
-  const map = new mapboxgl.Map({
-    container: "map",
-    style: STREETS,
-    center: (Number.isFinite(lng) && Number.isFinite(lat)) ? [lng, lat] : [-96, 37],
-    zoom: Number.isFinite(z) ? z : 4
-  });
+      if (pan) {
+        map.panTo(marker.getPosition());
+        if (map.getZoom() < 10) map.setZoom(10);
+      }
+    }
 
-  map.addControl(new mapboxgl.NavigationControl(), "top-right");
+    async function loadGeoJSON() {
+      if (!dataUrl) return;
+      const res = await fetch(dataUrl);
+      const gj = await res.json();
 
-  function loadGeoJSON() {
-    if (!geojsonUrl) return;
+      (gj.features || []).forEach((f) => {
+        if (f?.geometry?.type !== "Point") return;
 
-    fetch(geojsonUrl)
-      .then(r => r.json())
-      .then(data => {
-        // remove existing (in case of style swap)
-        if (map.getLayer("assets-layer")) map.removeLayer("assets-layer");
-        if (map.getSource("assets")) map.removeSource("assets");
+        const [lng, lat] = f.geometry.coordinates;
+        const props = f.properties || {};
+        const assetId = props.asset_id || props.id || props.device_id;
+        if (!assetId) return;
 
-        map.addSource("assets", { type: "geojson", data });
-
-        map.addLayer({
-          id: "assets-layer",
-          type: "circle",
-          source: "assets",
-          paint: {
-            "circle-radius": 6,
-            "circle-opacity": 0.9,
-            "circle-color": "#2563eb",
-            "circle-stroke-color": "#ffffff",
-            "circle-stroke-width": 1
-          }
+        const marker = new google.maps.Marker({
+          map,
+          position: { lat: Number(lat), lng: Number(lng) },
+          title: String(assetId)
         });
 
-        map.on("click", "assets-layer", (e) => {
-          const feature = e.features?.[0];
-          if (!feature) return;
-          // Send selected feature back to Retool parent
-          window.parent.postMessage({ type: "assetSelected", feature }, "*");
+        marker.addListener("click", () => {
+          setSelected(assetId, { pan: false });
+          window.parent?.postMessage(
+            { type: "assetSelected", assetId, properties: props },
+            "*"
+          );
         });
 
-        map.on("mouseenter", "assets-layer", () => map.getCanvas().style.cursor = "pointer");
-        map.on("mouseleave", "assets-layer", () => map.getCanvas().style.cursor = "");
-      })
-      .catch(err => console.error("GeoJSON load error:", err));
-  }
+        markersById.set(String(assetId), marker);
+      });
+    }
 
-  map.on("load", loadGeoJSON);
+    // Receive commands from Retool
+    window.addEventListener("message", (e) => {
+      const msg = e.data;
+      if (!msg || typeof msg !== "object") return;
 
-  document.getElementById("satToggle").addEventListener("change", (e) => {
-    map.setStyle(e.target.checked ? SAT : STREETS);
-    map.once("load", loadGeoJSON); // re-add layer after style swap
-  });
-</script>
+      if (msg.type === "selectAsset" && msg.assetId) {
+        setSelected(String(msg.assetId), { pan: true });
+      }
+    });
 
+    function initMap() {
+      map = new google.maps.Map(document.getElementById("map"), {
+        center: { lat: defaultLat, lng: defaultLng },
+        zoom: defaultZoom,
+        mapTypeId: "roadmap"
+      });
+
+      document.getElementById("satToggle").addEventListener("change", (e) => {
+        map.setMapTypeId(e.target.checked ? "hybrid" : "roadmap");
+      });
+
+      loadGeoJSON().catch(console.error);
+    }
+
+    window.initMap = initMap;
+  </script>
+
+  <script async defer
+    src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDNWxbBYJ5BRj6KxPa66eMh5veT8HY4JEo&callback=initMap">
+  </script>
 </body>
 </html>
