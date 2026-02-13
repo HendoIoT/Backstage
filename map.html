@@ -68,7 +68,7 @@
 
       if (pan) {
         map.panTo(marker.getPosition());
-        if (map.getZoom() < 10) map.setZoom(10);
+        if (map.getZoom() < 10) map.setZoom(12);
       }
     }
 
@@ -148,6 +148,11 @@
       // Auto-zoom to show all markers
       if (!bounds.isEmpty()) {
         map.fitBounds(bounds);
+        google.maps.event.addListenerOnce(map, "bounds_changed", () => {
+  const z = map.getZoom();
+  if (z > 12) map.setZoom(12);   // don't zoom in too far on tight clusters
+  if (z < 5)  map.setZoom(5);    // don't zoom out too far on wide spread
+});
       }
     }
 
