@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <title>Backstage Asset Map</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+
   <style>
     html, body { height: 100%; margin: 0; }
     #map { height: 100%; width: 100%; }
@@ -23,24 +24,28 @@
 
     .badge {
       position: absolute;
-      bottom: 10px;
       left: 10px;
-      background: rgba(255,255,255,.9);
+      top: 10px;
+      background: rgba(255,255,255,.92);
       padding: 6px 10px;
       border-radius: 6px;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
       z-index: 5;
       box-shadow: 0 2px 10px rgba(0,0,0,.12);
-      font-size: 12px;
+      max-width: 70%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
   </style>
 </head>
+
 <body>
   <div class="toggle">
     <label><input type="checkbox" id="satToggle"> Satellite</label>
   </div>
-  <div class="badge" id="statusBadge">Loading…</div>
 
+  <div class="badge" id="status">Loading…</div>
   <div id="map"></div>
 
   <script>
@@ -51,8 +56,11 @@
     const COLOR_SELECTED   = "#0079bd"; // blue
 
     // URL params:
-    //  - data=<URL-ENCODED-RETOOL-PUBLIC-URL>  (Retool workflow URL)
+    //  - data=<URL-ENCODED-RETOOL-PUBLIC-URL>  (Retool workflow URL that returns GeoJSON)
     //  - lat, lng, z (optional default viewport)
+    //
+    // URL hash:
+    //  - #asset=<device_identifier> (selection control; no reload)
     const params = new URLSearchParams(location.search);
     const dataUrl = params.get("data");
 
@@ -64,12 +72,11 @@
     // State
     // ==========================================================
     let map;
-    const markersById = new Map(); // device_identifier -> google.maps.Marker
+    const markersById = new Map(); // assetId -> google.maps.Marker
     let selectedId = null;
-    let pendingSelectId = null;
 
-    const statusBadge = () => document.getElementById("statusBadge");
-    function setStatus(text) { statusBadge().textContent = text; }
+    const statusEl = () => document.getElementById("status");
+    function setStatus(msg) { statusEl().textContent = msg; }
 
     function iconDot(color, scale = 7) {
       return {
@@ -82,11 +89,46 @@
       };
     }
 
-    function setSelected(assetId, { pan = true, zoomTo = 12 } = {}) {
+    // ==========================================================
+    // Hash helpers
+    // ==========================================================
+    function parseHashAssetId(hashStr) {
+      const hash = (hashStr ?? location.hash ?? "").replace(/^#/, "");
+      const hp = new URLSearchParams(hash);
+      return hp.get("asset");
+    }
+
+    function writeHashAssetId(assetId) {
+      const encoded = encodeURIComponent(String(assetId));
+      const nextHash = `#asset=${encoded}`;
+
+      // Always update our own hash (so this page is self-contained)
+      if (location.hash !== nextHash) {
+        location.hash = nextHash;
+      }
+
+      // Then try to update the parent hash (so Retool can react)
+      try {
+        // This will work when the parent allows it; if blocked, no harm.
+        if (window.parent && window.parent !== window) {
+          if (window.parent.location.hash !== nextHash) {
+            window.parent.location.hash = nextHash;
+          }
+        }
+      } catch (e) {
+        // Cross-origin rules may block parent access. That's okay.
+      }
+    }
+
+    // ==========================================================
+    // Selection logic
+    // ==========================================================
+    function setSelected(assetId, { pan = true } = {}) {
       if (!assetId) return;
+
       const id = String(assetId);
 
-      // Reset previous selection
+      // reset previous
       if (selectedId && markersById.has(selectedId)) {
         const prev = markersById.get(selectedId);
         prev.setIcon(iconDot(COLOR_UNSELECTED, 7));
@@ -97,30 +139,25 @@
 
       const marker = markersById.get(id);
       if (!marker) {
-        // Data not loaded yet; remember it
-        pendingSelectId = id;
+        // If marker isn't created yet (data still loading), selection will apply later.
+        setStatus(`Selected (waiting for marker): ${id}`);
         return;
       }
 
       marker.setIcon(iconDot(COLOR_SELECTED, 9));
       marker.setZIndex(9999);
 
+      setStatus(`Selected: ${id}`);
+
       if (pan && map) {
         map.panTo(marker.getPosition());
-        // Zoom in if currently too zoomed out
-        if (map.getZoom() < 10) map.setZoom(zoomTo);
+        if (map.getZoom() < 10) map.setZoom(12);
       }
-
-      // Update our own hash (safe inside iframe)
-      try {
-        location.hash = `asset=${encodeURIComponent(id)}`;
-      } catch (e) {}
     }
 
-    function parseHashAssetId() {
-      const hash = (location.hash || "").replace(/^#/, "");
-      const hp = new URLSearchParams(hash);
-      return hp.get("asset");
+    function selectFromHash() {
+      const assetId = parseHashAssetId();
+      if (assetId) setSelected(assetId, { pan: true });
     }
 
     // ==========================================================
@@ -128,38 +165,40 @@
     // ==========================================================
     async function loadGeoJSON() {
       if (!dataUrl) {
-        setStatus("No data URL (missing ?data=...)");
+        setStatus("No data URL provided (missing ?data=...)");
         console.warn("No data= URL param provided.");
         return;
       }
 
-      setStatus("Fetching data…");
-      const res = await fetch(dataUrl);
+      setStatus("Loading markers…");
+
+      const res = await fetch(dataUrl, { cache: "no-store" });
       if (!res.ok) {
-        setStatus(`Fetch failed (${res.status})`);
-        console.error("GeoJSON fetch failed:", res.status, await res.text());
+        const txt = await res.text().catch(() => "");
+        setStatus(`GeoJSON fetch failed: ${res.status}`);
+        console.error("GeoJSON fetch failed:", res.status, txt);
         return;
       }
 
       const payload = await res.json();
+      // Retool often wraps: { data: <featureCollection> }
       const gj = payload?.data ?? payload;
 
       if (!gj || gj.type !== "FeatureCollection" || !Array.isArray(gj.features)) {
-        setStatus("Invalid GeoJSON");
+        setStatus("Invalid GeoJSON response");
         console.error("Invalid GeoJSON response. Got:", payload);
         return;
       }
 
-      // Clear existing markers
+      // clear existing markers
       for (const m of markersById.values()) m.setMap(null);
       markersById.clear();
-      selectedId = null;
+      // don't clear selectedId — keep it so we can apply selection after reload
 
-      setStatus(`Loaded ${gj.features.length} features`);
       console.log("Loaded features:", gj.features.length);
 
       const bounds = new google.maps.LatLngBounds();
-      let markerCount = 0;
+      let created = 0;
 
       for (const f of gj.features) {
         if (f?.geometry?.type !== "Point") continue;
@@ -168,9 +207,9 @@
         if (!Array.isArray(coords) || coords.length < 2) continue;
 
         const [lng, lat] = coords;
-        if (lng == null || lat == null) continue;
-
         const props = f.properties || {};
+
+        // Canonical ID — THIS MUST MATCH WHAT YOUR TABLE USES
         const assetId =
           props.device_identifier ||
           props.asset_id ||
@@ -180,36 +219,32 @@
 
         if (!assetId) continue;
 
+        const idStr = String(assetId);
+
         const marker = new google.maps.Marker({
           map,
           position: { lat: Number(lat), lng: Number(lng) },
-          title: String(assetId),
-          icon: iconDot(COLOR_UNSELECTED, 7),
-          optimized: true
+          title: idStr,
+          icon: iconDot(COLOR_UNSELECTED, 7)
         });
 
-        markerCount++;
         bounds.extend(marker.getPosition());
-        markersById.set(String(assetId), marker);
+        markersById.set(idStr, marker);
+        created++;
 
         marker.addListener("click", () => {
-          // Highlight + pan/zoom
-          setSelected(assetId, { pan: true });
-
-          // Send selection up to Retool (preferred method)
-          window.parent?.postMessage(
-            { type: "assetSelected", assetId: String(assetId), properties: props },
-            "*"
-          );
+          // 1) highlight locally
+          setSelected(idStr, { pan: true });
+          // 2) broadcast selection upward to Retool via parent hash
+          writeHashAssetId(idStr);
         });
       }
 
-      setStatus(`Markers: ${markerCount}`);
+      setStatus(`Markers loaded: ${created}`);
 
-      if (markerCount > 0 && !bounds.isEmpty()) {
+      // Fit map to show all markers (only if we didn't have a specific selection)
+      if (!bounds.isEmpty()) {
         map.fitBounds(bounds);
-
-        // Clamp zoom after fitBounds to avoid super-wide or super-tight
         google.maps.event.addListenerOnce(map, "bounds_changed", () => {
           const z = map.getZoom();
           if (z > 12) map.setZoom(12);
@@ -217,42 +252,9 @@
         });
       }
 
-      // If a selection came in before markers loaded, apply it now
-      const hashId = parseHashAssetId();
-      const preferred = pendingSelectId || hashId;
-      if (preferred) {
-        setSelected(preferred, { pan: true });
-        pendingSelectId = null;
-      }
+      // Apply any selection from hash (Retool -> Map)
+      selectFromHash();
     }
-
-    // ==========================================================
-    // Retool -> Map (postMessage selection)
-    // ==========================================================
-    window.addEventListener("message", (e) => {
-      const msg = e.data;
-      if (!msg || typeof msg !== "object") return;
-
-      if (msg.type === "selectAsset" && msg.assetId) {
-        setSelected(String(msg.assetId), { pan: true });
-      }
-
-      if (msg.type === "refreshData") {
-        loadGeoJSON().catch(console.error);
-      }
-
-      if (msg.type === "setMapType" && msg.mapTypeId && map) {
-        map.setMapTypeId(msg.mapTypeId);
-        const cb = document.getElementById("satToggle");
-        if (cb) cb.checked = (msg.mapTypeId === "hybrid" || msg.mapTypeId === "satellite");
-      }
-    });
-
-    // Hash changes (optional fallback)
-    window.addEventListener("hashchange", () => {
-      const id = parseHashAssetId();
-      if (id) setSelected(id, { pan: true });
-    });
 
     // ==========================================================
     // Init
@@ -263,22 +265,31 @@
         zoom: defaultZoom,
         mapTypeId: "roadmap",
         clickableIcons: false,
-        streetViewControl: true,
-        fullscreenControl: true
+        streetViewControl: true
       });
 
+      // Satellite toggle
       document.getElementById("satToggle").addEventListener("change", (e) => {
         map.setMapTypeId(e.target.checked ? "hybrid" : "roadmap");
       });
 
-      loadGeoJSON().catch(console.error);
+      // Listen for hash changes (Retool updates iframe URL hash)
+      window.addEventListener("hashchange", () => {
+        selectFromHash();
+      });
+
+      loadGeoJSON().catch((err) => {
+        setStatus("Error loading markers");
+        console.error(err);
+      });
     }
 
     window.initMap = initMap;
   </script>
 
+  <!-- Google Maps JS API -->
   <script async defer
-    src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDNWxbBYJ5BRj6KxPa66eMh5veT8HY4JEo&callback=initMap">
+    src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY&callback=initMap">
   </script>
 </body>
 </html>
