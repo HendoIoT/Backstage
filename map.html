@@ -37,6 +37,7 @@
     // ==========================================================
     const COLOR_UNSELECTED = "#eaae2a"; // yellow
     const COLOR_SELECTED   = "#0079bd"; // blue
+    const ZOOM_ON_SELECT   = 17;        // zoom in tight on selection
 
     // URL params:
     //  - data=<URL-ENCODED-RETOOL-WORKFLOW-URL>
@@ -92,20 +93,23 @@
 
       if (pan && map) {
         map.panTo(marker.getPosition());
-        map.setZoom(17);  // 16–18 is tight asset-level zoom
+        map.setZoom(ZOOM_ON_SELECT);
       }
     }
 
     function selectFromHash() {
       const assetId = parseHashAssetId();
-      if (assetId) setSelected(assetId);
+      if (assetId) setSelected(assetId, { pan: true });
     }
 
     // ==========================================================
     // Load GeoJSON from Retool workflow
     // ==========================================================
     async function loadGeoJSON() {
-      if (!dataUrl) return;
+      if (!dataUrl) {
+        console.warn("Missing ?data= workflow URL");
+        return;
+      }
 
       const res = await fetch(dataUrl, { cache: "no-store" });
       if (!res.ok) {
@@ -116,7 +120,7 @@
       const payload = await res.json();
       const gj = payload?.data ?? payload;
 
-      if (!gj || gj.type !== "FeatureCollection") {
+      if (!gj || gj.type !== "FeatureCollection" || !Array.isArray(gj.features)) {
         console.error("Invalid GeoJSON response:", payload);
         return;
       }
@@ -124,14 +128,17 @@
       // Clear markers
       for (const m of markersById.values()) m.setMap(null);
       markersById.clear();
-      // IMPORTANT: do NOT clear selectedId
+      // IMPORTANT: do NOT clear selectedId (keeps selection through reloads)
 
       const bounds = new google.maps.LatLngBounds();
 
       for (const f of gj.features) {
         if (f?.geometry?.type !== "Point") continue;
 
-        const [lng, lat] = f.geometry.coordinates;
+        const coords = f.geometry.coordinates;
+        if (!Array.isArray(coords) || coords.length < 2) continue;
+
+        const [lng, lat] = coords;
         const props = f.properties || {};
 
         // Canonical ID must match Retool table key
@@ -152,23 +159,24 @@
 
         marker.addListener("click", () => {
           // highlight locally
-          setSelected(idStr);
+          setSelected(idStr, { pan: true });
 
-          // keep iframe hash in sync
+          // keep iframe hash in sync (Retool->Map uses this)
           location.hash = `#asset=${encodeURIComponent(idStr)}`;
 
-          // send selection to Retool (Map -> Table)
+          // Map -> Retool: use window.top (Retool sandbox blocks window.parent access)
           try {
-            window.parent.postMessage(
+            window.top.postMessage(
               { type: "SELECT_ASSET", assetId: idStr },
               "*"
             );
           } catch (e) {
-            console.warn("postMessage failed", e);
+            console.warn("postMessage failed:", e);
           }
         });
       }
 
+      // Fit bounds (initial view)
       if (!bounds.isEmpty()) {
         map.fitBounds(bounds);
         google.maps.event.addListenerOnce(map, "bounds_changed", () => {
@@ -180,6 +188,11 @@
 
       // Apply selection from Retool (if any)
       selectFromHash();
+
+      // If selectedId was already set earlier, try applying it now too
+      if (selectedId && markersById.has(selectedId)) {
+        setSelected(selectedId, { pan: false });
+      }
     }
 
     // ==========================================================
@@ -198,6 +211,7 @@
         map.setMapTypeId(e.target.checked ? "hybrid" : "roadmap");
       });
 
+      // Retool -> Map selection updates hash inside iframe
       window.addEventListener("hashchange", selectFromHash);
 
       loadGeoJSON().catch(console.error);
