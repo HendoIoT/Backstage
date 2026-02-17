@@ -4,9 +4,11 @@
   <meta charset="utf-8" />
   <title>Backstage Asset Map</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+
   <style>
     html, body { height: 100%; margin: 0; }
     #map { height: 100%; width: 100%; }
+
     .toggle {
       position: absolute;
       top: 10px;
@@ -15,12 +17,13 @@
       padding: 6px 10px;
       border-radius: 6px;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      z-index: 1;
+      z-index: 5;
       box-shadow: 0 2px 10px rgba(0,0,0,.12);
       user-select: none;
     }
   </style>
 </head>
+
 <body>
   <div class="toggle">
     <label><input type="checkbox" id="satToggle"> Satellite</label>
@@ -29,97 +32,112 @@
   <div id="map"></div>
 
   <script>
-    // URL params:
-    //  - data=<URL-ENCODED-RETOOL-PUBLIC-URL>
-    //  - lat, lng, z (optional default viewport)
-    const params = new URLSearchParams(location.search);
-    const dataUrl = params.get("data");
-    const defaultLat = Number(params.get("lat")) || 37;
-    const defaultLng = Number(params.get("lng")) || -96;
-    const defaultZoom = Number(params.get("z")) || 4;
-
-    let map;
-    const markersById = new Map(); // assetId -> marker
-    let selectedId = null;
-
-    // Colors requested
+    // ==========================================================
+    // Config
+    // ==========================================================
     const COLOR_UNSELECTED = "#eaae2a"; // yellow
     const COLOR_SELECTED   = "#0079bd"; // blue
 
-    // Icons
-    function iconUnselected() {
-      return {
-        path: google.maps.SymbolPath.CIRCLE,
-        fillColor: COLOR_UNSELECTED,
-        fillOpacity: 1,
-        strokeColor: "#ffffff",
-        strokeWeight: 2,
-        scale: 7
-      };
-    }
+    // URL params:
+    //  - data=<URL-ENCODED-RETOOL-PUBLIC-URL>  (Retool workflow URL)
+    //  - lat, lng, z (optional default viewport)
+    //
+    // URL hash:
+    //  - #asset=<device_identifier> (selection control; no reload)
+    const params = new URLSearchParams(location.search);
+    const dataUrl = params.get("data");
 
-    function iconSelected() {
+    const defaultLat  = Number(params.get("lat")) || 37;
+    const defaultLng  = Number(params.get("lng")) || -96;
+    const defaultZoom = Number(params.get("z"))   || 4;
+
+    // ==========================================================
+    // State
+    // ==========================================================
+    let map;
+    const markersById = new Map(); // device_identifier -> google.maps.Marker
+    let selectedId = null;
+
+    function iconDot(color, scale = 7) {
       return {
         path: google.maps.SymbolPath.CIRCLE,
-        fillColor: COLOR_SELECTED,
+        fillColor: color,
         fillOpacity: 1,
         strokeColor: "#ffffff",
         strokeWeight: 2,
-        scale: 9
+        scale
       };
     }
 
     function setSelected(assetId, { pan = true } = {}) {
       if (!assetId) return;
 
-      // reset old selection back to yellow
+      const id = String(assetId);
+
+      // reset previous
       if (selectedId && markersById.has(selectedId)) {
-        const old = markersById.get(selectedId);
-        old.setIcon(iconUnselected());
-        old.setZIndex(undefined);
+        const prev = markersById.get(selectedId);
+        prev.setIcon(iconDot(COLOR_UNSELECTED, 7));
+        prev.setZIndex(undefined);
       }
 
-      selectedId = String(assetId);
-      const marker = markersById.get(selectedId);
-      if (!marker) return;
+      selectedId = id;
 
-      // set selected styling (blue)
-      marker.setIcon(iconSelected());
+      const marker = markersById.get(id);
+      if (!marker) {
+        // If marker not found yet (data still loading), just store selectedId
+        return;
+      }
+
+      marker.setIcon(iconDot(COLOR_SELECTED, 9));
       marker.setZIndex(9999);
 
       if (pan) {
-        const pos = marker.getPosition();
-        if (pos) map.panTo(pos);
-
-        // Force a useful zoom level for investigation
-        const targetZoom = 12;
-        if (map.getZoom() !== targetZoom) map.setZoom(targetZoom);
+        map.panTo(marker.getPosition());
+        // zoom in a bit, but don't go crazy
+        if (map.getZoom() < 10) map.setZoom(12);
       }
     }
 
+    // ==========================================================
+    // Hash-based selection (works in sandboxed iframes)
+    // ==========================================================
+    function parseHashAssetId() {
+      const hash = (location.hash || "").replace(/^#/, "");
+      const hp = new URLSearchParams(hash);
+      return hp.get("asset");
+    }
+
+    function selectFromHash() {
+      const assetId = parseHashAssetId();
+      if (assetId) setSelected(assetId, { pan: true });
+    }
+
+    // ==========================================================
+    // Data loading
+    // ==========================================================
     async function loadGeoJSON() {
       if (!dataUrl) {
         console.warn("No data= URL param provided.");
         return;
       }
 
-      // Use GET (no custom headers) to avoid CORS preflight issues
       const res = await fetch(dataUrl);
-
       if (!res.ok) {
-        console.error("Data fetch failed:", res.status, await res.text());
+        console.error("GeoJSON fetch failed:", res.status, await res.text());
         return;
       }
 
       const payload = await res.json();
-      const gj = payload?.data ?? payload; // Retool wraps as { data: ... }
+      // Retool typically wraps: { data: <featureCollection> }
+      const gj = payload?.data ?? payload;
 
       if (!gj || gj.type !== "FeatureCollection" || !Array.isArray(gj.features)) {
         console.error("Invalid GeoJSON response. Got:", payload);
         return;
       }
 
-      // clear existing markers if reloading
+      // clear existing markers
       for (const m of markersById.values()) m.setMap(null);
       markersById.clear();
       selectedId = null;
@@ -128,15 +146,16 @@
 
       const bounds = new google.maps.LatLngBounds();
 
-      gj.features.forEach((f) => {
-        if (f?.geometry?.type !== "Point") return;
+      for (const f of gj.features) {
+        if (f?.geometry?.type !== "Point") continue;
 
         const coords = f.geometry.coordinates;
-        if (!Array.isArray(coords) || coords.length < 2) return;
+        if (!Array.isArray(coords) || coords.length < 2) continue;
 
         const [lng, lat] = coords;
         const props = f.properties || {};
 
+        // Prefer device_identifier from your workflow payload
         const assetId =
           props.device_identifier ||
           props.asset_id ||
@@ -144,67 +163,69 @@
           props.device_id ||
           props.name;
 
-        if (!assetId) return;
+        if (!assetId) continue;
 
         const marker = new google.maps.Marker({
           map,
           position: { lat: Number(lat), lng: Number(lng) },
           title: String(assetId),
-          icon: iconUnselected()
+          icon: iconDot(COLOR_UNSELECTED, 7)
         });
 
         bounds.extend(marker.getPosition());
+        markersById.set(String(assetId), marker);
 
         marker.addListener("click", () => {
-          // IMPORTANT: pan/zoom on click
+          // highlight locally
           setSelected(assetId, { pan: true });
 
-          // send selection back to parent (Retool iframe)
-          window.parent?.postMessage(
-            { type: "assetSelected", assetId: String(assetId), properties: props },
-            "*"
-          );
+          // push selection upward via parent hash (Retool can observe hash)
+          try {
+            window.parent.location.hash = `asset=${encodeURIComponent(String(assetId))}`;
+          } catch (e) {
+            // If parent hash write is blocked, at least update our own hash
+            location.hash = `asset=${encodeURIComponent(String(assetId))}`;
+          }
         });
+      }
 
-        markersById.set(String(assetId), marker);
-      });
-
-      // Auto-zoom to show all markers (overview)
+      // Fit map to show all markers
       if (!bounds.isEmpty()) {
         map.fitBounds(bounds);
 
-        // Clamp initial zoom so it isn't too zoomed out or too zoomed in
+        // Clamp zoom after fitBounds
         google.maps.event.addListenerOnce(map, "bounds_changed", () => {
           const z = map.getZoom();
           if (z > 12) map.setZoom(12);
           if (z < 5)  map.setZoom(5);
         });
       }
+
+      // Apply any selection that was requested via hash
+      selectFromHash();
     }
 
-    // Receive commands from Retool (table click -> highlight marker)
-    window.addEventListener("message", (e) => {
-      const msg = e.data;
-      if (!msg || typeof msg !== "object") return;
-
-      if (msg.type === "selectAsset" && msg.assetId) {
-        setSelected(String(msg.assetId), { pan: true });
-      }
-
-      if (msg.type === "setMapType" && msg.mapTypeId && map) {
-        map.setMapTypeId(msg.mapTypeId);
-      }
-    });
-
+    // ==========================================================
+    // Init
+    // ==========================================================
     function initMap() {
       map = new google.maps.Map(document.getElementById("map"), {
         center: { lat: defaultLat, lng: defaultLng },
         zoom: defaultZoom,
-        mapTypeId: "roadmap"
+        mapTypeId: "roadmap",
+        // optional: clean UI a bit
+        clickableIcons: false,
+        streetViewControl: true
       });
 
+      // Satellite toggle
       document.getElementById("satToggle").addEventListener("change", (e) => {
         map.setMapTypeId(e.target.checked ? "hybrid" : "roadmap");
+      });
+
+      // Listen for hash changes (Retool updates iframe URL hash)
+      window.addEventListener("hashchange", () => {
+        selectFromHash();
       });
 
       loadGeoJSON().catch(console.error);
@@ -213,6 +234,7 @@
     window.initMap = initMap;
   </script>
 
+  <!-- Google Maps JS API -->
   <script async defer
     src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDNWxbBYJ5BRj6KxPa66eMh5veT8HY4JEo&callback=initMap">
   </script>
