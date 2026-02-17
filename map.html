@@ -166,7 +166,7 @@
           console.log("[map] clicked marker", idStr, "sending message to parent");
         
           try {
-            window.parent.postMessage({ type: "SELECT_ASSET", assetId: idStr }, "*");
+            window.parent.postMessage({ __source: "backstage-map", type: "SELECT_ASSET", assetId: idStr }, "*");
           } catch (e) {
             console.warn("[map] postMessage failed:", e);
           }
