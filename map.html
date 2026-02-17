@@ -13,7 +13,7 @@
       position: absolute;
       top: 10px;
       right: 10px;
-      background: white;
+      background: rgba(255,255,255,.95);
       padding: 6px 10px;
       border-radius: 6px;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
@@ -26,7 +26,7 @@
       position: absolute;
       left: 10px;
       top: 10px;
-      background: rgba(255,255,255,.92);
+      background: rgba(255,255,255,.95);
       padding: 6px 10px;
       border-radius: 6px;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
@@ -56,11 +56,11 @@
     const COLOR_SELECTED   = "#0079bd"; // blue
 
     // URL params:
-    //  - data=<URL-ENCODED-RETOOL-PUBLIC-URL>  (Retool workflow URL that returns GeoJSON)
+    //  - data=<URL-ENCODED-RETOOL-PUBLIC-URL> (Retool workflow URL that returns GeoJSON)
     //  - lat, lng, z (optional default viewport)
     //
     // URL hash:
-    //  - #asset=<device_identifier> (selection control; no reload)
+    //  - #asset=<device_identifier>
     const params = new URLSearchParams(location.search);
     const dataUrl = params.get("data");
 
@@ -72,11 +72,11 @@
     // State
     // ==========================================================
     let map;
-    const markersById = new Map(); // assetId -> google.maps.Marker
+    const markersById = new Map(); // device_identifier -> google.maps.Marker
     let selectedId = null;
 
     const statusEl = () => document.getElementById("status");
-    function setStatus(msg) { statusEl().textContent = msg; }
+    function setStatus(msg) { if (statusEl()) statusEl().textContent = msg; }
 
     function iconDot(color, scale = 7) {
       return {
@@ -98,25 +98,22 @@
       return hp.get("asset");
     }
 
-    function writeHashAssetId(assetId) {
+    function writeHashes(assetId) {
       const encoded = encodeURIComponent(String(assetId));
       const nextHash = `#asset=${encoded}`;
 
-      // Always update our own hash (so this page is self-contained)
-      if (location.hash !== nextHash) {
-        location.hash = nextHash;
-      }
+      // Always update iframe hash (Retool -> Map uses this too)
+      if (location.hash !== nextHash) location.hash = nextHash;
 
-      // Then try to update the parent hash (so Retool can react)
+      // Try to update parent hash (Map -> Retool)
       try {
-        // This will work when the parent allows it; if blocked, no harm.
         if (window.parent && window.parent !== window) {
           if (window.parent.location.hash !== nextHash) {
             window.parent.location.hash = nextHash;
           }
         }
       } catch (e) {
-        // Cross-origin rules may block parent access. That's okay.
+        // Cross-origin access to parent may be blocked. That’s okay.
       }
     }
 
@@ -139,8 +136,8 @@
 
       const marker = markersById.get(id);
       if (!marker) {
-        // If marker isn't created yet (data still loading), selection will apply later.
-        setStatus(`Selected (waiting for marker): ${id}`);
+        // markers may not be loaded yet; keep selectedId for later
+        setStatus(`Selected (waiting): ${id}`);
         return;
       }
 
@@ -161,11 +158,11 @@
     }
 
     // ==========================================================
-    // Data loading
+    // Data loading (GeoJSON)
     // ==========================================================
     async function loadGeoJSON() {
       if (!dataUrl) {
-        setStatus("No data URL provided (missing ?data=...)");
+        setStatus("Missing ?data= workflow URL");
         console.warn("No data= URL param provided.");
         return;
       }
@@ -181,8 +178,7 @@
       }
 
       const payload = await res.json();
-      // Retool often wraps: { data: <featureCollection> }
-      const gj = payload?.data ?? payload;
+      const gj = payload?.data ?? payload; // Retool often wraps in {data: ...}
 
       if (!gj || gj.type !== "FeatureCollection" || !Array.isArray(gj.features)) {
         setStatus("Invalid GeoJSON response");
@@ -193,9 +189,7 @@
       // clear existing markers
       for (const m of markersById.values()) m.setMap(null);
       markersById.clear();
-      // don't clear selectedId — keep it so we can apply selection after reload
-
-      console.log("Loaded features:", gj.features.length);
+      // IMPORTANT: do NOT clear selectedId; we want to apply selection after reload
 
       const bounds = new google.maps.LatLngBounds();
       let created = 0;
@@ -209,14 +203,8 @@
         const [lng, lat] = coords;
         const props = f.properties || {};
 
-        // Canonical ID — THIS MUST MATCH WHAT YOUR TABLE USES
-        const assetId =
-          props.device_identifier ||
-          props.asset_id ||
-          props.id ||
-          props.device_id ||
-          props.name;
-
+        // Canonical ID: device_identifier (your primary key)
+        const assetId = props.device_identifier;
         if (!assetId) continue;
 
         const idStr = String(assetId);
@@ -233,16 +221,16 @@
         created++;
 
         marker.addListener("click", () => {
-          // 1) highlight locally
+          // highlight locally
           setSelected(idStr, { pan: true });
-          // 2) broadcast selection upward to Retool via parent hash
-          writeHashAssetId(idStr);
+          // broadcast selection to parent (Retool)
+          writeHashes(idStr);
         });
       }
 
-      setStatus(`Markers loaded: ${created}`);
+      setStatus(`Markers: ${created}`);
 
-      // Fit map to show all markers (only if we didn't have a specific selection)
+      // Fit bounds
       if (!bounds.isEmpty()) {
         map.fitBounds(bounds);
         google.maps.event.addListenerOnce(map, "bounds_changed", () => {
@@ -252,7 +240,7 @@
         });
       }
 
-      // Apply any selection from hash (Retool -> Map)
+      // Apply selection requested by hash (Retool -> Map)
       selectFromHash();
     }
 
@@ -273,11 +261,15 @@
         map.setMapTypeId(e.target.checked ? "hybrid" : "roadmap");
       });
 
-      // Listen for hash changes (Retool updates iframe URL hash)
+      // Retool -> Map selection updates hash inside iframe
       window.addEventListener("hashchange", () => {
         selectFromHash();
       });
 
+      // Initial selection (in case hash exists on load)
+      selectFromHash();
+
+      // Load markers
       loadGeoJSON().catch((err) => {
         setStatus("Error loading markers");
         console.error(err);
@@ -287,9 +279,9 @@
     window.initMap = initMap;
   </script>
 
-  <!-- Google Maps JS API -->
+  <!-- Google Maps JS API (REPLACE KEY) -->
   <script async defer
-    src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY&callback=initMap">
+    src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDNWxbBYJ5BRj6KxPa66eMh5veT8HY4JEo&callback=initMap">
   </script>
 </body>
 </html>
