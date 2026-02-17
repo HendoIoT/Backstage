@@ -45,7 +45,6 @@
     <label><input type="checkbox" id="satToggle"> Satellite</label>
   </div>
 
-  <div class="badge" id="status">Loading…</div>
   <div id="map"></div>
 
   <script>
@@ -74,9 +73,6 @@
     let map;
     const markersById = new Map(); // device_identifier -> google.maps.Marker
     let selectedId = null;
-
-    const statusEl = () => document.getElementById("status");
-    function setStatus(msg) { if (statusEl()) statusEl().textContent = msg; }
 
     function iconDot(color, scale = 7) {
       return {
@@ -137,14 +133,11 @@
       const marker = markersById.get(id);
       if (!marker) {
         // markers may not be loaded yet; keep selectedId for later
-        setStatus(`Selected (waiting): ${id}`);
         return;
       }
 
       marker.setIcon(iconDot(COLOR_SELECTED, 9));
       marker.setZIndex(9999);
-
-      setStatus(`Selected: ${id}`);
 
       if (pan && map) {
         map.panTo(marker.getPosition());
@@ -162,17 +155,13 @@
     // ==========================================================
     async function loadGeoJSON() {
       if (!dataUrl) {
-        setStatus("Missing ?data= workflow URL");
         console.warn("No data= URL param provided.");
         return;
       }
 
-      setStatus("Loading markers…");
-
       const res = await fetch(dataUrl, { cache: "no-store" });
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
-        setStatus(`GeoJSON fetch failed: ${res.status}`);
         console.error("GeoJSON fetch failed:", res.status, txt);
         return;
       }
@@ -181,7 +170,6 @@
       const gj = payload?.data ?? payload; // Retool often wraps in {data: ...}
 
       if (!gj || gj.type !== "FeatureCollection" || !Array.isArray(gj.features)) {
-        setStatus("Invalid GeoJSON response");
         console.error("Invalid GeoJSON response. Got:", payload);
         return;
       }
@@ -221,14 +209,24 @@
         created++;
 
         marker.addListener("click", () => {
-          // highlight locally
-          setSelected(idStr, { pan: true });
-          // broadcast selection to parent (Retool)
-          writeHashes(idStr);
-        });
-      }
+  // highlight locally
+  setSelected(idStr, { pan: true });
 
-      setStatus(`Markers: ${created}`);
+  // keep iframe hash in sync (optional but nice for debugging)
+  location.hash = `#asset=${encodeURIComponent(idStr)}`;
+
+  // send selection to Retool (works even when parent hash is blocked)
+  try {
+    window.parent.postMessage(
+      { type: "SELECT_ASSET", assetId: idStr },
+      "*"
+    );
+  } catch (e) {
+    console.warn("postMessage failed", e);
+  }
+});
+
+      }
 
       // Fit bounds
       if (!bounds.isEmpty()) {
@@ -271,7 +269,6 @@
 
       // Load markers
       loadGeoJSON().catch((err) => {
-        setStatus("Error loading markers");
         console.error(err);
       });
     }
