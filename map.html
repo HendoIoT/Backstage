@@ -158,22 +158,20 @@
         markersById.set(idStr, marker);
 
         marker.addListener("click", () => {
-          // highlight locally
           setSelected(idStr, { pan: true });
-
-          // keep iframe hash in sync (Retool->Map uses this)
+        
+          // keep iframe hash in sync
           location.hash = `#asset=${encodeURIComponent(idStr)}`;
-
-          // Map -> Retool: use window.top (Retool sandbox blocks window.parent access)
+        
+          console.log("[map] clicked marker", idStr, "sending message to parent");
+        
           try {
-            window.top.postMessage(
-              { type: "SELECT_ASSET", assetId: idStr },
-              "*"
-            );
+            window.parent.postMessage({ type: "SELECT_ASSET", assetId: idStr }, "*");
           } catch (e) {
-            console.warn("postMessage failed:", e);
+            console.warn("[map] postMessage failed:", e);
           }
         });
+
       }
 
       // Fit bounds (initial view)
