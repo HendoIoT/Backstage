@@ -149,6 +149,11 @@
         },
         "*"
       );
+      console.log("[map] postMessage sent", {
+        source: "backstage-map",
+        type: "PIN_CLICK",
+        device_identifier: id
+      });
     }
 
     // ==========================================================
