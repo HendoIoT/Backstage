@@ -37,7 +37,7 @@
     // ==========================================================
     const COLOR_UNSELECTED = "#eaae2a"; // yellow
     const COLOR_SELECTED   = "#0079bd"; // blue
-    const ZOOM_ON_SELECT   = 17;        // zoom in tight on selection
+    const ZOOM_ON_SELECT   = 17;
 
     // URL params:
     //  - data=<URL-ENCODED-RETOOL-WORKFLOW-URL>
@@ -141,11 +141,11 @@
         const [lng, lat] = coords;
         const props = f.properties || {};
 
-        // Canonical ID must match Retool table key
+        // Must match your Retool table key exactly
         const assetId = props.device_identifier;
         if (!assetId) continue;
 
-        const idStr = String(assetId);
+        const idStr = String(assetId).trim();
 
         const marker = new google.maps.Marker({
           map,
@@ -158,20 +158,33 @@
         markersById.set(idStr, marker);
 
         marker.addListener("click", () => {
+          // highlight locally
           setSelected(idStr, { pan: true });
-        
+
           // keep iframe hash in sync
           location.hash = `#asset=${encodeURIComponent(idStr)}`;
-        
-          console.log("[map] clicked marker", idStr, "sending message to parent");
-        
+
+          // Map -> Retool: send to BOTH parent + top (Retool iframe nesting varies)
+          const payload = {
+            __source: "backstage-map",
+            type: "SELECT_ASSET",
+            assetId: idStr
+          };
+
+          console.log("[map] clicked marker", idStr, "sending SELECT_ASSET", payload);
+
           try {
-            window.parent.postMessage({ __source: "backstage-map", type: "SELECT_ASSET", assetId: idStr }, "*");
+            window.parent.postMessage(payload, "*");
           } catch (e) {
-            console.warn("[map] postMessage failed:", e);
+            console.warn("[map] parent postMessage failed:", e);
+          }
+
+          try {
+            window.top.postMessage(payload, "*");
+          } catch (e) {
+            console.warn("[map] top postMessage failed:", e);
           }
         });
-
       }
 
       // Fit bounds (initial view)
@@ -218,7 +231,7 @@
     window.initMap = initMap;
   </script>
 
-  <!-- REPLACE WITH YOUR ACTUAL API KEY -->
+  <!-- NOTE: Replace YOUR_GOOGLE_MAPS_API_KEY with your key -->
   <script
     src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAznJRwl2rM2V-mgz5qErJ2MTd2d2E0ISs&callback=initMap&loading=async"
     async
