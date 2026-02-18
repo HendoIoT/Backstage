@@ -134,27 +134,25 @@
     // Map -> Retool (postMessage)
     // ==========================================================
     function notifyParentPinClick(device_identifier) {
-      const id = String(device_identifier).trim();
-      if (!id) return;
+        const id = String(device_identifier).trim();
+        if (!id) return;
 
-      // Keep iframe state consistent
-      location.hash = `#asset=${encodeURIComponent(id)}`;
+        // Build a new URL based on current location
+        const url = new URL(window.location.href);
 
-      // Send a message Retool can receive on the IFrame "On message" handler
-      window.parent.postMessage(
-        {
-          source: "backstage-map",
-          type: "PIN_CLICK",
-          device_identifier: id
-        },
-        "*"
-      );
-      console.log("[map] postMessage sent", {
-        source: "backstage-map",
-        type: "PIN_CLICK",
-        device_identifier: id
-      });
-    }
+        // Update / add ?asset= parameter
+        url.searchParams.set("asset", id);
+
+        // IMPORTANT: keep existing ?data= param intact
+        // (searchParams.set only updates asset)
+
+        // Replace URL without reloading page
+        history.replaceState(null, "", url.toString());
+
+        console.log("[map] PIN_CLICK", id);
+        console.log("[map] URL updated to", window.location.href);
+      }
+
 
     // ==========================================================
     // Data loading
