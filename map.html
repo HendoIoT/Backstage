@@ -9,47 +9,71 @@
     html, body { height: 100%; margin: 0; }
     #map { height: 100%; width: 100%; }
 
-    .toggle {
+    .hud {
       position: absolute;
       top: 10px;
       right: 10px;
       background: rgba(255,255,255,.95);
-      padding: 6px 10px;
-      border-radius: 6px;
+      padding: 8px 10px;
+      border-radius: 8px;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
       z-index: 5;
       box-shadow: 0 2px 10px rgba(0,0,0,.12);
       user-select: none;
+      display: flex;
+      gap: 10px;
+      align-items: center;
     }
+    .hud label { display:flex; gap:6px; align-items:center; }
+    .hud small { opacity: .65; font-size: 12px; }
   </style>
 </head>
 
 <body>
-  <div class="toggle">
+  <div class="hud">
     <label><input type="checkbox" id="satToggle"> Satellite</label>
+    <small id="status">Loading…</small>
   </div>
 
   <div id="map"></div>
 
   <script>
+    /**********************************************************************
+     * Backstage Asset Map (GitHub-hosted) — Retool iframe safe
+     *
+     * Goals:
+     *  1) Retool table row click -> highlight pin  ✅ (via iframe hash #asset=...)
+     *  2) Pin click -> tell Retool to select row   ✅ (via postMessage)
+     *
+     * Why postMessage?
+     *  - Retool iframes are sandboxed; direct parent access (parent.location,
+     *    parent.addEventListener, parent.document, etc.) is blocked and causes
+     *    the "Sandbox access violation" error you saw.
+     **********************************************************************/
+
     // ==========================================================
     // Config
     // ==========================================================
     const COLOR_UNSELECTED = "#eaae2a"; // yellow
     const COLOR_SELECTED   = "#0079bd"; // blue
-    const ZOOM_ON_SELECT   = 17;        // zoom in tight on selection
+    const ZOOM_ON_SELECT   = 17;
 
     // URL params:
-    //  - data=<URL-ENCODED-RETOOL-WORKFLOW-URL>
+    //  - data=<URL-ENCODED-RETOOL-WORKFLOW-URL>  (returns GeoJSON FeatureCollection)
     //
-    // URL hash:
-    //  - #asset=<device_identifier> (selection control)
+    // Iframe hash:
+    //  - #asset=<device_identifier>  (Retool -> Map selection control)
     const params = new URLSearchParams(location.search);
     const dataUrl = params.get("data");
 
     let map;
     const markersById = new Map(); // device_identifier -> google.maps.Marker
     let selectedId = null;
+
+    function setStatus(msg) {
+      const el = document.getElementById("status");
+      if (el) el.textContent = msg;
+    }
 
     function iconDot(color, scale = 7) {
       return {
@@ -63,7 +87,7 @@
     }
 
     // ==========================================================
-    // Hash-based selection (Retool -> Map)
+    // Retool -> Map (hash-based selection)
     // ==========================================================
     function parseHashAssetId() {
       const hash = (location.hash || "").replace(/^#/, "");
@@ -75,6 +99,7 @@
       if (!assetId) return;
 
       const id = String(assetId).trim();
+      if (!id) return;
 
       // reset previous
       if (selectedId && markersById.has(selectedId)) {
@@ -86,7 +111,10 @@
       selectedId = id;
 
       const marker = markersById.get(id);
-      if (!marker) return; // marker not loaded yet
+      if (!marker) {
+        // selection before markers loaded: keep selectedId and apply after load
+        return;
+      }
 
       marker.setIcon(iconDot(COLOR_SELECTED, 9));
       marker.setZIndex(9999);
@@ -103,21 +131,23 @@
     }
 
     // ==========================================================
-    // Map -> Retool via parent URL hash (NO postMessage)
+    // Map -> Retool (postMessage)
     // ==========================================================
-    function setParentAssetHash(assetId) {
-      const id = String(assetId).trim();
+    function notifyParentPinClick(device_identifier) {
+      const id = String(device_identifier).trim();
       if (!id) return;
 
-      // Update our own hash too (keeps map consistent)
+      // Keep iframe state consistent
       location.hash = `#asset=${encodeURIComponent(id)}`;
 
-      // Update parent hash (Retool listens for hashchange)
-      try {
-        window.parent.location.hash = `asset=${encodeURIComponent(id)}`;
-      } catch (e) {
-        console.warn("[map] Unable to set parent hash:", e);
-      }
+      // Send a message Retool can receive on the IFrame "On message" handler
+      window.parent.postMessage(
+        {
+          type: "PIN_CLICK",
+          device_identifier: id
+        },
+        "*"
+      );
     }
 
     // ==========================================================
@@ -125,13 +155,18 @@
     // ==========================================================
     async function loadGeoJSON() {
       if (!dataUrl) {
+        setStatus("Missing ?data= URL");
         console.warn("Missing ?data= workflow URL");
         return;
       }
 
+      setStatus("Fetching pins…");
+
       const res = await fetch(dataUrl, { cache: "no-store" });
       if (!res.ok) {
-        console.error("GeoJSON fetch failed:", res.status, await res.text());
+        const txt = await res.text().catch(() => "");
+        setStatus(`Fetch failed (${res.status})`);
+        console.error("GeoJSON fetch failed:", res.status, txt);
         return;
       }
 
@@ -139,6 +174,7 @@
       const gj = payload?.data ?? payload;
 
       if (!gj || gj.type !== "FeatureCollection" || !Array.isArray(gj.features)) {
+        setStatus("Invalid GeoJSON");
         console.error("Invalid GeoJSON response. Got:", payload);
         return;
       }
@@ -146,9 +182,9 @@
       // clear markers
       for (const m of markersById.values()) m.setMap(null);
       markersById.clear();
-      // do NOT clear selectedId (keeps selection through reloads)
 
       const bounds = new google.maps.LatLngBounds();
+      let added = 0;
 
       for (const f of gj.features) {
         if (f?.geometry?.type !== "Point") continue;
@@ -159,11 +195,12 @@
         const [lng, lat] = coords;
         const props = f.properties || {};
 
-        // Must match your Retool table key exactly
+        // PRIMARY KEY MUST MATCH RETOOL TABLE: device_identifier
         const assetId = props.device_identifier;
         if (!assetId) continue;
 
         const idStr = String(assetId).trim();
+        if (!idStr) continue;
 
         const marker = new google.maps.Marker({
           map,
@@ -174,14 +211,15 @@
 
         bounds.extend(marker.getPosition());
         markersById.set(idStr, marker);
+        added++;
 
         marker.addListener("click", () => {
           // highlight locally
           setSelected(idStr, { pan: true });
 
-          // send selection upward via parent hash (Retool Cloud-safe)
-          console.log("[map] clicked marker", idStr, "-> set parent hash");
-          setParentAssetHash(idStr);
+          // tell Retool (safe)
+          console.log("[map] PIN_CLICK", idStr);
+          notifyParentPinClick(idStr);
         });
       }
 
@@ -202,6 +240,8 @@
       if (selectedId && markersById.has(selectedId)) {
         setSelected(selectedId, { pan: false });
       }
+
+      setStatus(`Loaded ${added} pins`);
     }
 
     // ==========================================================
@@ -224,13 +264,16 @@
       // Retool -> Map: hash changes inside iframe
       window.addEventListener("hashchange", selectFromHash);
 
-      loadGeoJSON().catch(console.error);
+      loadGeoJSON().catch((err) => {
+        console.error(err);
+        setStatus("Error loading pins");
+      });
     }
 
     window.initMap = initMap;
   </script>
 
-  <!-- NOTE: Replace YOUR_GOOGLE_MAPS_API_KEY with your key -->
+  <!-- NOTE: keep your key here -->
   <script
     src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAznJRwl2rM2V-mgz5qErJ2MTd2d2E0ISs&callback=initMap&loading=async"
     async
