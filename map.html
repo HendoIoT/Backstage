@@ -142,7 +142,11 @@
 
       // Send a message Retool can receive on the IFrame "On message" handler
       window.parent.postMessage(
-        { source: "backstage-map", type: "PIN_CLICK", device_identifier: id },
+        {
+          source: "backstage-map",
+          type: "PIN_CLICK",
+          device_identifier: id
+        },
         "*"
       );
     }
