@@ -37,18 +37,18 @@
     // ==========================================================
     const COLOR_UNSELECTED = "#eaae2a"; // yellow
     const COLOR_SELECTED   = "#0079bd"; // blue
-    const ZOOM_ON_SELECT   = 17;
+    const ZOOM_ON_SELECT   = 17;        // zoom in tight on selection
 
     // URL params:
     //  - data=<URL-ENCODED-RETOOL-WORKFLOW-URL>
     //
     // URL hash:
-    //  - #asset=<device_identifier>
+    //  - #asset=<device_identifier> (selection control)
     const params = new URLSearchParams(location.search);
     const dataUrl = params.get("data");
 
     let map;
-    const markersById = new Map(); // device_identifier -> marker
+    const markersById = new Map(); // device_identifier -> google.maps.Marker
     let selectedId = null;
 
     function iconDot(color, scale = 7) {
@@ -63,7 +63,7 @@
     }
 
     // ==========================================================
-    // Selection via hash (Retool -> Map)
+    // Hash-based selection (Retool -> Map)
     // ==========================================================
     function parseHashAssetId() {
       const hash = (location.hash || "").replace(/^#/, "");
@@ -74,9 +74,9 @@
     function setSelected(assetId, { pan = true } = {}) {
       if (!assetId) return;
 
-      const id = String(assetId);
+      const id = String(assetId).trim();
 
-      // reset previous selection
+      // reset previous
       if (selectedId && markersById.has(selectedId)) {
         const prev = markersById.get(selectedId);
         prev.setIcon(iconDot(COLOR_UNSELECTED, 7));
@@ -86,7 +86,7 @@
       selectedId = id;
 
       const marker = markersById.get(id);
-      if (!marker) return; // marker may not be loaded yet
+      if (!marker) return; // marker not loaded yet
 
       marker.setIcon(iconDot(COLOR_SELECTED, 9));
       marker.setZIndex(9999);
@@ -103,7 +103,25 @@
     }
 
     // ==========================================================
-    // Load GeoJSON from Retool workflow
+    // Map -> Retool via parent URL hash (NO postMessage)
+    // ==========================================================
+    function setParentAssetHash(assetId) {
+      const id = String(assetId).trim();
+      if (!id) return;
+
+      // Update our own hash too (keeps map consistent)
+      location.hash = `#asset=${encodeURIComponent(id)}`;
+
+      // Update parent hash (Retool listens for hashchange)
+      try {
+        window.parent.location.hash = `asset=${encodeURIComponent(id)}`;
+      } catch (e) {
+        console.warn("[map] Unable to set parent hash:", e);
+      }
+    }
+
+    // ==========================================================
+    // Data loading
     // ==========================================================
     async function loadGeoJSON() {
       if (!dataUrl) {
@@ -113,7 +131,7 @@
 
       const res = await fetch(dataUrl, { cache: "no-store" });
       if (!res.ok) {
-        console.error("GeoJSON fetch failed:", res.status);
+        console.error("GeoJSON fetch failed:", res.status, await res.text());
         return;
       }
 
@@ -121,14 +139,14 @@
       const gj = payload?.data ?? payload;
 
       if (!gj || gj.type !== "FeatureCollection" || !Array.isArray(gj.features)) {
-        console.error("Invalid GeoJSON response:", payload);
+        console.error("Invalid GeoJSON response. Got:", payload);
         return;
       }
 
-      // Clear markers
+      // clear markers
       for (const m of markersById.values()) m.setMap(null);
       markersById.clear();
-      // IMPORTANT: do NOT clear selectedId (keeps selection through reloads)
+      // do NOT clear selectedId (keeps selection through reloads)
 
       const bounds = new google.maps.LatLngBounds();
 
@@ -161,33 +179,13 @@
           // highlight locally
           setSelected(idStr, { pan: true });
 
-          // keep iframe hash in sync
-          location.hash = `#asset=${encodeURIComponent(idStr)}`;
-
-          // Map -> Retool: send to BOTH parent + top (Retool iframe nesting varies)
-          const payload = {
-            __source: "backstage-map",
-            type: "SELECT_ASSET",
-            assetId: idStr
-          };
-
-          console.log("[map] clicked marker", idStr, "sending SELECT_ASSET", payload);
-
-          try {
-            window.parent.postMessage(payload, "*");
-          } catch (e) {
-            console.warn("[map] parent postMessage failed:", e);
-          }
-
-          try {
-            window.top.postMessage(payload, "*");
-          } catch (e) {
-            console.warn("[map] top postMessage failed:", e);
-          }
+          // send selection upward via parent hash (Retool Cloud-safe)
+          console.log("[map] clicked marker", idStr, "-> set parent hash");
+          setParentAssetHash(idStr);
         });
       }
 
-      // Fit bounds (initial view)
+      // Fit map to show all markers
       if (!bounds.isEmpty()) {
         map.fitBounds(bounds);
         google.maps.event.addListenerOnce(map, "bounds_changed", () => {
@@ -197,10 +195,10 @@
         });
       }
 
-      // Apply selection from Retool (if any)
+      // Apply selection requested via hash
       selectFromHash();
 
-      // If selectedId was already set earlier, try applying it now too
+      // If a selection existed already, apply it without panning
       if (selectedId && markersById.has(selectedId)) {
         setSelected(selectedId, { pan: false });
       }
@@ -218,11 +216,12 @@
         streetViewControl: true
       });
 
+      // Satellite toggle
       document.getElementById("satToggle").addEventListener("change", (e) => {
         map.setMapTypeId(e.target.checked ? "hybrid" : "roadmap");
       });
 
-      // Retool -> Map selection updates hash inside iframe
+      // Retool -> Map: hash changes inside iframe
       window.addEventListener("hashchange", selectFromHash);
 
       loadGeoJSON().catch(console.error);
